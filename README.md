@@ -3,7 +3,7 @@
 A mini-project demonstrating an interactive 2D graphics application built with Python, PyQt5 for the GUI, and PyOpenGL for rendering. This application allows users to draw various shapes using classic graphics algorithms, apply transformations, style them, and save their work.
 
 
-<img width="1176" height="961" alt="image" src="https://github.com/user-attachments/assets/50a8647c-a538-4e2c-a0e2-4f4a97875fde" />
+<img width="976" height="761" alt="image" src="https://github.com/user-attachments/assets/50a8647c-a538-4e2c-a0e2-4f4a97875fde" />
 
 
 
