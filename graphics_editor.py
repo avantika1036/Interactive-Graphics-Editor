@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QColorDialog, QLineEdit, QOpenGLWidget, QStatusBar
 )
-from PyQt5.QtGui import QOpenGLContext, QColor
+from PyQt5.QtGui import QOpenGLContext, QColor, QCursor # Import QCursor
 from PyQt5.QtCore import Qt, QSize
 
 from OpenGL.GL import *
@@ -57,7 +57,10 @@ MODE_SELECTING_OBJECT = 8
 MODE_APPLY_TRANSLATE = 9
 MODE_APPLY_ROTATE = 10
 MODE_APPLY_SCALE = 11
-MODE_APPLY_REFLECT = 12
+MODE_APPLY_REFLECT = 12 # This is now a general reflect mode
+MODE_APPLY_REFLECT_LINE_P1 = 13 # New: First point for arbitrary line reflection
+MODE_APPLY_REFLECT_LINE_P2 = 14 # New: Second point for arbitrary line reflection
+
 
 # --- Colors ---
 COLORS = {
@@ -73,6 +76,7 @@ COLORS = {
     "GRID_LINES_LIGHT": (0.7, 0.7, 0.7), # Darker grey for grid lines
     "AXIS_LINES_LIGHT": (0.4, 0.4, 0.4),  # Even darker grey for axis
     "TEMP_POINTS_LIGHT": (0.0, 0.0, 0.0), # Black for temp points on light background
+    "REFLECTION_LINE": (0.8, 0.2, 0.8) # Magenta for the arbitrary reflection line
 }
 
 # --- Global State (Managed by MainWindow/OpenGLCanvas classes) ---
@@ -320,6 +324,44 @@ def draw_thick_object(effective_params, obj_type, thickness, mask, current_color
     
     glLineWidth(1.0) # Reset line width to default after drawing thick object
 
+# --- Helper for reflecting a single point across a line ---
+def reflect_point_across_line(px, py, line_p1x, line_p1y, line_p2x, line_p2y):
+    # If the line is a single point, reflection is undefined or the point itself
+    if line_p1x == line_p2x and line_p1y == line_p2y:
+        return px, py # Or handle as an error/no reflection
+
+    # Case 1: Vertical line (slope is infinite)
+    if line_p1x == line_p2x:
+        # Reflection across x = line_p1x
+        reflected_x = 2 * line_p1x - px
+        reflected_y = py
+        return reflected_x, reflected_y
+
+    # Case 2: Horizontal line (slope is zero)
+    if line_p1y == line_p2y:
+        # Reflection across y = line_p1y
+        reflected_x = px
+        reflected_y = 2 * line_p1y - py
+        return reflected_x, reflected_y
+
+    # Case 3: General line (y = mx + c)
+    # Calculate slope (m) and y-intercept (c) of the reflection line
+    m = (line_p2y - line_p1y) / (line_p2x - line_p1x)
+    c = line_p1y - m * line_p1x
+
+    # Formula for reflection of (px, py) across y = mx + c
+    # Let (x', y') be the reflected point
+    
+    # Calculate denominator common to both formulas
+    denom = 1 + m*m
+
+    # Calculate reflected coordinates
+    reflected_x = (px * (1 - m*m) + 2 * m * py - 2 * m * c) / denom
+    reflected_y = (py * (m*m - 1) + 2 * m * px + 2 * c) / denom
+
+    return reflected_x, reflected_y
+
+
 # --- Transformations ---
 def apply_transformations(obj):
     transformed_params = obj["params"].copy()
@@ -384,7 +426,7 @@ def apply_transformations(obj):
                 transformed_params["rx"] *= sx
                 transformed_params["ry"] *= sy
 
-        elif t["type"] == "reflect":
+        elif t["type"] == "reflect": # For X, Y, Origin reflections
             axis = t["axis"]
             
             if obj["type"] == "line":
@@ -408,6 +450,26 @@ def apply_transformations(obj):
                 elif axis == "origin":
                     transformed_params["xc"] = -transformed_params["xc"]
                     transformed_params["yc"] = -transformed_params["yc"]
+        
+        elif t["type"] == "reflect_line": # New: Reflection across an arbitrary line
+            line_p1x, line_p1y = t["line_p1"]
+            line_p2x, line_p2y = t["line_p2"]
+
+            if obj["type"] == "line":
+                px, py = transformed_params["x1"], transformed_params["y1"]
+                rx1, ry1 = reflect_point_across_line(px, py, line_p1x, line_p1y, line_p2x, line_p2y)
+                transformed_params["x1"], transformed_params["y1"] = rx1, ry1
+
+                px, py = transformed_params["x2"], transformed_params["y2"]
+                rx2, ry2 = reflect_point_across_line(px, py, line_p1x, line_p1y, line_p2x, line_p2y)
+                transformed_params["x2"], transformed_params["y2"] = rx2, ry2
+            
+            elif obj["type"] == "circle" or obj["type"] == "ellipse":
+                cx, cy = transformed_params["xc"], transformed_params["yc"]
+                rcx, rcy = reflect_point_across_line(cx, cy, line_p1x, line_p1y, line_p2x, line_p2y)
+                transformed_params["xc"], transformed_params["yc"] = rcx, rcy
+            # Radii for circles/ellipses are magnitudes, they don't change with reflection.
+            # Only their center point is reflected.
 
     return transformed_params
 
@@ -581,6 +643,22 @@ class OpenGLCanvas(QOpenGLWidget):
         glEnd()
         glPointSize(1.0)
 
+        # Draw the arbitrary reflection line being defined
+        if current_mode == MODE_APPLY_REFLECT_LINE_P2 and len(temp_points) == 1:
+            glColor3fv(COLORS["REFLECTION_LINE"]) # Magenta line
+            glLineWidth(2.0)
+            glBegin(GL_LINES)
+            sx1, sy1 = logical_to_screen(temp_points[0][0], temp_points[0][1])
+            # Corrected: Get global mouse position and map to canvas local
+            global_mouse_pos = QCursor.pos()
+            local_mouse_pos = self.mapFromGlobal(global_mouse_pos)
+            current_logical_x, current_logical_y = screen_to_logical(local_mouse_pos.x(), local_mouse_pos.y())
+            sx2, sy2 = logical_to_screen(current_logical_x, current_logical_y)
+            glVertex2f(sx1, sy1)
+            glVertex2f(sx2, sy2)
+            glEnd()
+            glLineWidth(1.0)
+
 
     def mousePressEvent(self, event):
         global current_mode, temp_points, selected_object_id, next_object_id
@@ -602,7 +680,7 @@ class OpenGLCanvas(QOpenGLWidget):
             logical_x, logical_y = screen_to_logical(snapped_x_screen, snapped_y_screen)
 
 
-            if current_algo_func is None and current_mode not in [MODE_SELECTING_OBJECT, MODE_APPLY_TRANSLATE]:
+            if current_algo_func is None and current_mode not in [MODE_SELECTING_OBJECT, MODE_APPLY_TRANSLATE, MODE_APPLY_REFLECT_LINE_P1, MODE_APPLY_REFLECT_LINE_P2]: # Added new reflect modes
                 self.main_window_ref.update_status("Please select an algorithm or action from the menu first.", "red")
                 current_mode = MODE_IDLE
                 return
@@ -636,6 +714,10 @@ class OpenGLCanvas(QOpenGLWidget):
                 save_objects_to_file()
                 temp_points = []
                 current_mode = MODE_IDLE
+                # Deactivate style and algorithm buttons after drawing
+                self.main_window_ref._highlight_active_algo_button(None)
+                self.main_window_ref._highlight_active_style_button(None)
+
 
             elif current_mode == MODE_DRAWING_CIRCLE_CENTER:
                 temp_points.append((logical_x, logical_y))
@@ -665,6 +747,10 @@ class OpenGLCanvas(QOpenGLWidget):
                 save_objects_to_file()
                 temp_points = []
                 current_mode = MODE_IDLE
+                # Deactivate style and algorithm buttons after drawing
+                self.main_window_ref._highlight_active_algo_button(None)
+                self.main_window_ref._highlight_active_style_button(None)
+
 
             elif current_mode == MODE_DRAWING_ELLIPSE_CENTER:
                 # First click for ellipse is the center, snap it
@@ -685,7 +771,7 @@ class OpenGLCanvas(QOpenGLWidget):
 
 
             elif current_mode == MODE_DRAWING_ELLIPSE_RY_POINT:
-                # Third click for ellipse defines Y-Radius point
+                temp_points.append((logical_x, logical_y))
                 cx, cy = temp_points[0]
                 rx_point_x, rx_point_y = temp_points[1] # Retrieve the second clicked point
                 ry_point_x, ry_point_y = logical_x, logical_y # This is the newly clicked point
@@ -713,6 +799,9 @@ class OpenGLCanvas(QOpenGLWidget):
                 save_objects_to_file()
                 temp_points = []
                 current_mode = MODE_IDLE
+                # Deactivate style and algorithm buttons after drawing
+                self.main_window_ref._highlight_active_algo_button(None)
+                self.main_window_ref._highlight_active_style_button(None)
 
             elif current_mode == MODE_SELECTING_OBJECT:
                 selected_object_id = -1
@@ -785,7 +874,7 @@ class OpenGLCanvas(QOpenGLWidget):
                             # Normalize the click point relative to the ellipse's center and visual radii
                             # Also consider the base_selection_pixel_tolerance in the normalization for hit detection
                             normalized_x = (logical_x - center_x) / (outer_rx_visual + base_selection_pixel_tolerance)
-                            normalized_y = (logical_y - center_y) / (outer_ry_visual + base_selection_pixel_tolerance)
+                            normalized_y = (logical_y - center_y) / (outer_ry_visual + base_selection_pixel_tolerance) # Corrected typo ry_visual
                             
                             ellipse_value_for_hitbox = (normalized_x**2) + (normalized_y**2)
 
@@ -814,7 +903,12 @@ class OpenGLCanvas(QOpenGLWidget):
                     selected_object_id = -1
                     self.main_window_ref.update_status("No object selected.", "red")
                 current_mode = MODE_IDLE # Reset to idle after selection attempt
-            
+                self.main_window_ref._highlight_active_transform_button(None) # Clear transform buttons
+                self.main_window_ref._highlight_active_object_action_button(None) # Clear object action buttons
+                self.main_window_ref._highlight_active_algo_button(None) # Also clear algorithm highlight
+                self.main_window_ref._highlight_active_style_button(None) # Also clear style highlight
+
+
             elif selected_object_id != -1 and current_mode == MODE_APPLY_TRANSLATE:
                 obj_to_transform = next((obj for obj in objects_to_draw if obj["id"] == selected_object_id), None)
                 if obj_to_transform:
@@ -830,12 +924,58 @@ class OpenGLCanvas(QOpenGLWidget):
                         temp_points = []
                         selected_object_id = -1 # Deselect after transformation
                         current_mode = MODE_IDLE # Reset mode
+                        self.main_window_ref._highlight_active_transform_button(None) # Clear transform buttons
+                        self.main_window_ref._highlight_active_algo_button(None) # Also clear algorithm highlight
+                        self.main_window_ref._highlight_active_style_button(None) # Also clear style highlight
                 else:
                     self.main_window_ref.update_status("No object selected for translation.", "red")
                     selected_object_id = -1 # Ensure deselected if somehow lost
                     current_mode = MODE_IDLE # Reset mode
+                    self.main_window_ref._highlight_active_transform_button(None) # Clear transform buttons
+                    self.main_window_ref._highlight_active_algo_button(None) # Also clear algorithm highlight
+                    self.main_window_ref._highlight_active_style_button(None) # Also clear style highlight
+            
+            # --- New: Handling arbitrary line reflection clicks ---
+            elif selected_object_id != -1 and current_mode == MODE_APPLY_REFLECT_LINE_P1:
+                temp_points.append((logical_x, logical_y))
+                current_mode = MODE_APPLY_REFLECT_LINE_P2
+                self.main_window_ref.update_status(f"Line Reflection P1 (snapped): ({logical_x}, {logical_y}). Click P2 to define reflection line.", "#333333")
+            elif selected_object_id != -1 and current_mode == MODE_APPLY_REFLECT_LINE_P2:
+                obj_to_transform = next((obj for obj in objects_to_draw if obj["id"] == selected_object_id), None)
+                if obj_to_transform:
+                    temp_points.append((logical_x, logical_y))
+                    line_p1x, line_p1y = temp_points[0]
+                    line_p2x, line_p2y = temp_points[1]
+                    
+                    obj_to_transform["transformations"].append({
+                        "type": "reflect_line",
+                        "line_p1": (line_p1x, line_p1y),
+                        "line_p2": (line_p2x, line_p2y)
+                    })
+                    self.main_window_ref.update_status(f"Reflected across line from ({line_p1x}, {line_p1y}) to ({line_p2x}, {line_p2y}).", "blue")
+                    save_objects_to_file()
+                    temp_points = []
+                    selected_object_id = -1 # Deselect after transformation
+                    current_mode = MODE_IDLE
+                    self.main_window_ref._highlight_active_transform_button(None) # Clear transform buttons
+                    self.main_window_ref._highlight_active_algo_button(None) # Also clear algorithm highlight
+                    self.main_window_ref._highlight_active_style_button(None) # Also clear style highlight
+                else:
+                    self.main_window_ref.update_status("No object selected for line reflection.", "red")
+                    selected_object_id = -1
+                    current_mode = MODE_IDLE
+                    self.main_window_ref._highlight_active_transform_button(None) # Clear transform buttons
+                    self.main_window_ref._highlight_active_algo_button(None) # Also clear algorithm highlight
+                    self.main_window_ref._highlight_active_style_button(None) # Also clear style highlight
+            # --- End new reflection handling ---
 
         self.update()
+    
+    def mouseMoveEvent(self, event):
+        # Update canvas for dynamic line drawing feedback during arbitrary line reflection
+        if current_mode == MODE_APPLY_REFLECT_LINE_P2 and len(temp_points) == 1:
+            self.update() # Request a repaint to show the temporary reflection line
+
 
     def keyPressEvent(self, event):
         # Pass key events to the main window's input dialog handler if active
@@ -870,6 +1010,14 @@ class MainWindow(QMainWindow):
         # --- UI State for highlighting active buttons ---
         self.active_algo_button = None
         self.active_style_button = None
+        self.active_transform_button = None # New: for active transform button
+        self.active_object_action_button = None # New: for active object action button
+        # --- Initialize button attributes BEFORE they are referenced in _add_button calls ---
+        self.translate_btn = None
+        self.rotate_btn = None
+        self.scale_btn = None
+        self.reflect_btn = None
+        self.select_obj_btn = None
         # ---
 
         # Define color palettes for each group
@@ -887,13 +1035,16 @@ class MainWindow(QMainWindow):
         self._add_button(menu_layout, "Toggle Grid", self.toggle_grid, group_key="view")
 
         self._add_menu_section(menu_layout, "TRANSFORMATIONS")
-        self._add_button(menu_layout, "Translate", lambda: self.set_mode(MODE_APPLY_TRANSLATE, "Translate"), group_key="transformations")
-        self._add_button(menu_layout, "Rotate", self.prompt_rotate, group_key="transformations")
-        self._add_button(menu_layout, "Scale", self.prompt_scale, group_key="transformations")
-        self._add_button(menu_layout, "Reflect", self.prompt_reflect, group_key="transformations")
+        # Modified to pass button reference
+        self.translate_btn = self._add_button(menu_layout, "Translate", lambda btn=self.translate_btn: self.set_mode(MODE_APPLY_TRANSLATE, "Translate", btn), group_key="transformations")
+        self.rotate_btn = self._add_button(menu_layout, "Rotate", lambda btn=self.rotate_btn: self.prompt_rotate(btn), group_key="transformations") # Pass button to prompt_rotate
+        self.scale_btn = self._add_button(menu_layout, "Scale", lambda btn=self.scale_btn: self.prompt_scale(btn), group_key="transformations") # Pass button to prompt_scale
+        self.reflect_btn = self._add_button(menu_layout, "Reflect", lambda btn=self.reflect_btn: self.prompt_reflect(btn), group_key="transformations") # Pass button to prompt_reflect
+
 
         self._add_menu_section(menu_layout, "OBJECT ACTIONS")
-        self._add_button(menu_layout, "Select Object", lambda: self.set_mode(MODE_SELECTING_OBJECT, "Select Object"), group_key="object_actions")
+        # Modified to pass button reference
+        self.select_obj_btn = self._add_button(menu_layout, "Select Object", lambda btn=self.select_obj_btn: self.set_mode(MODE_SELECTING_OBJECT, "Select Object", btn), group_key="object_actions")
         self._add_button(menu_layout, "Edit Selected", self.prompt_edit_object, group_key="object_actions")
         self._add_button(menu_layout, "Delete Selected", self.delete_selected_object, group_key="object_actions")
 
@@ -965,10 +1116,19 @@ class MainWindow(QMainWindow):
 
     def _add_button(self, layout, text, callback, group_key="dark_grey"): # Added group_key
         btn = QPushButton(text)
-        btn.clicked.connect(callback)
+        # Use a lambda that captures the `btn` when defining the callback for proper highlighting
+        if "Translate" in text or "Select Object" in text: # These set mode directly
+            btn.clicked.connect(lambda checked=False, b=btn: callback(b))
+        elif "Rotate" in text or "Scale" in text or "Reflect" in text: # These prompt, then set mode
+            btn.clicked.connect(lambda checked=False, b=btn: callback(b))
+        else: # Other buttons like "Toggle Grid", "Edit Selected", "Delete Selected", "Pick Color"
+            btn.clicked.connect(callback)
+
+
         btn.setFixedWidth(MENU_WIDTH_PX - 20) # Explicitly set fixed width, accounting for margins/padding
 
         c1, c2, h1, h2 = self.color_palettes.get(group_key, self.color_palettes["object_actions"]) # Default to object_actions grey
+        active_c1, active_c2, active_h1, active_h2 = self.color_palettes["active_green"] # Use green for active
 
         btn.setStyleSheet(f"""
             QPushButton {{
@@ -990,6 +1150,12 @@ class MainWindow(QMainWindow):
             QPushButton:pressed {{
                 background-color: {h2};
                 box-shadow: inset 1px 1px 3px rgba(0, 0, 0, 0.4);
+            }}
+            QPushButton.active {{ /* Style for active state */
+                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #28a745, stop:1 #218838);
+                color: white;
+                font-weight: bold;
+                box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.3);
             }}
         """)
         layout.addWidget(btn)
@@ -1021,7 +1187,7 @@ class MainWindow(QMainWindow):
                 box-shadow: 1px 1px 5px rgba(0, 0, 0, 0.2);
             }}
             QPushButton.active {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #28a745, stop:1 #218838); /* Green gradient for active */
+                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #28a745, stop:1 #218838);
                 color: white;
                 font-weight: bold;
                 box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.3);
@@ -1067,7 +1233,7 @@ class MainWindow(QMainWindow):
                 box-shadow: inset 1px 1px 3px rgba(0, 0, 0, 0.4);
             }}
             QPushButton.active {{
-                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #28a745, stop:1 #218838); /* Green gradient for active */
+                background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #28a745, stop:1 #218838);
                 color: white;
                 font-weight: bold;
                 box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.3);
@@ -1097,6 +1263,29 @@ class MainWindow(QMainWindow):
             new_active_button.setProperty("class", "active")
             new_active_button.setStyleSheet(new_active_button.styleSheet())
         self.active_style_button = new_active_button
+    
+    # New: Highlight active transformation button
+    def _highlight_active_transform_button(self, new_active_button):
+        if self.active_transform_button:
+            self.active_transform_button.setProperty("class", "")
+            self.active_transform_button.setStyleSheet(self.active_transform_button.styleSheet())
+        
+        if new_active_button:
+            new_active_button.setProperty("class", "active")
+            new_active_button.setStyleSheet(new_active_button.styleSheet())
+        self.active_transform_button = new_active_button
+
+    # New: Highlight active object action button
+    def _highlight_active_object_action_button(self, new_active_button):
+        if self.active_object_action_button:
+            self.active_object_action_button.setProperty("class", "")
+            self.active_object_action_button.setStyleSheet(self.active_object_action_button.styleSheet())
+        
+        if new_active_button:
+            new_active_button.setProperty("class", "active")
+            new_active_button.setStyleSheet(new_active_button.styleSheet())
+        self.active_object_action_button = new_active_button
+
 
     def update_status(self, message, color="black"): # Default status color to black for light mode
         self.statusBar.setStyleSheet(f"QStatusBar {{ color: {color}; }}")
@@ -1107,12 +1296,30 @@ class MainWindow(QMainWindow):
         self.color_swatch.setStyleSheet(f"background-color: rgb({r}, {g}, {b}); border: 1px solid #555555; border-radius: 5px;")
 
 
-    def set_mode(self, mode, description=""):
+    def set_mode(self, mode, description="", button_ref=None): # Added button_ref
         global current_mode, temp_points, selected_object_id
+        
+        # Clear previous active states when entering a new mode
+        if current_mode not in [MODE_DRAWING_LINE_P1, MODE_DRAWING_LINE_P2, MODE_DRAWING_CIRCLE_CENTER, MODE_DRAWING_CIRCLE_RADIUS, MODE_DRAWING_ELLIPSE_CENTER, MODE_DRAWING_ELLIPSE_RX_POINT, MODE_DRAWING_ELLIPSE_RY_POINT]:
+            self._highlight_active_algo_button(None) # Clear algorithm button highlight
+        self._highlight_active_style_button(None) # Clear style button highlight
+        self._highlight_active_transform_button(None) # Clear transform button highlight
+        self._highlight_active_object_action_button(None) # Clear object action button highlight
+
         current_mode = mode
         temp_points = []
-        if mode in [MODE_DRAWING_LINE_P1, MODE_DRAWING_CIRCLE_CENTER, MODE_DRAWING_ELLIPSE_CENTER, MODE_IDLE]:
-            selected_object_id = -1 # Changed from None
+        # Keep selected object for transformations, but clear for drawing or new selections
+        if mode in [MODE_DRAWING_LINE_P1, MODE_DRAWING_CIRCLE_CENTER, MODE_DRAWING_ELLIPSE_CENTER, MODE_IDLE, MODE_SELECTING_OBJECT]:
+             selected_object_id = -1
+        
+        # Apply new active state if a button reference is provided and it's a transform/object action
+        if button_ref:
+            if mode in [MODE_APPLY_TRANSLATE, MODE_APPLY_ROTATE, MODE_APPLY_SCALE, MODE_APPLY_REFLECT, MODE_APPLY_REFLECT_LINE_P1]:
+                self._highlight_active_transform_button(button_ref)
+            elif mode == MODE_SELECTING_OBJECT:
+                self._highlight_active_object_action_button(button_ref)
+
+
         self.update_status(f"Mode changed to: {description}", "black")
         self.opengl_canvas.update()
 
@@ -1134,7 +1341,12 @@ class MainWindow(QMainWindow):
         global current_style_choice, current_thickness, current_mask
         current_style_choice = style_enum
         self.update_status(f"Selected style: {style_enum}", "black")
-        self._highlight_active_style_button(button_ref)
+        
+        self._highlight_active_style_button(button_ref) # Highlight the clicked style button
+        # self._highlight_active_algo_button(None) # Clear algo
+        self._highlight_active_transform_button(None) # Clear transform
+        self._highlight_active_object_action_button(None) # Clear object action
+
 
         if current_style_choice == STYLE_THICK:
             self.activate_input_dialog("Enter thickness (integer):", self._thickness_input_callback)
@@ -1169,9 +1381,15 @@ class MainWindow(QMainWindow):
         current_algo_func = algo_func
         current_object_type = obj_type
         temp_points = []
+        selected_object_id = -1 # Deselect when starting new drawing
         current_mode = click_mode
         self.update_status(f"Selected algorithm: {algo_func.__name__}. Mode: {click_mode}. Click on canvas to draw.", "black")
-        self._highlight_active_algo_button(button_ref)
+        
+        self._highlight_active_algo_button(button_ref) # Highlight the clicked algo button
+        self._highlight_active_style_button(None) # Clear style
+        self._highlight_active_transform_button(None) # Clear transform
+        self._highlight_active_object_action_button(None) # Clear object action
+
         self.opengl_canvas.update()
 
     def pick_color_dialog(self):
@@ -1216,6 +1434,10 @@ class MainWindow(QMainWindow):
             self.opengl_canvas.update()
             selected_object_id = -1 # Deselect after edit (Changed from None)
             self.update_status("Object edited and saved. Deselected object.", "green")
+            self._highlight_active_transform_button(None) # Clear any active transform
+            self._highlight_active_object_action_button(None) # Clear any active object action
+            self._highlight_active_algo_button(None) # Also clear algorithm highlight
+            self._highlight_active_style_button(None) # Also clear style highlight
 
         def edit_thickness_callback(thick_str):
             nonlocal obj_to_edit
@@ -1229,6 +1451,10 @@ class MainWindow(QMainWindow):
                 self.opengl_canvas.update()
                 selected_object_id = -1 # Deselect after edit (Changed from None)
                 self.update_status("Object edited and saved. Deselected object.", "green")
+                self._highlight_active_transform_button(None) # Clear any active transform
+                self._highlight_active_object_action_button(None) # Clear any active object action
+                self._highlight_active_algo_button(None) # Also clear algorithm highlight
+                self._highlight_active_style_button(None) # Also clear style highlight
 
         def edit_style_callback(style_str):
             nonlocal obj_to_edit
@@ -1246,16 +1472,28 @@ class MainWindow(QMainWindow):
                         self.opengl_canvas.update()
                         selected_object_id = -1 # Deselect after edit (Changed from None)
                         self.update_status("Object edited and saved. Deselected object.", "green")
+                        self._highlight_active_transform_button(None) # Clear any active transform
+                        self._highlight_active_object_action_button(None) # Clear any active object action
+                        self._highlight_active_algo_button(None) # Also clear algorithm highlight
+                        self._highlight_active_style_button(None) # Also clear style highlight
                 else:
                     self.update_status("Invalid style. Keeping previous.", "red")
                     save_objects_to_file()
                     self.opengl_canvas.update()
                     selected_object_id = -1 # Deselect if invalid style (Changed from None)
+                    self._highlight_active_transform_button(None) # Clear any active transform
+                    self._highlight_active_object_action_button(None) # Clear any active object action
+                    self._highlight_active_algo_button(None) # Also clear algorithm highlight
+                    self._highlight_active_style_button(None) # Also clear style highlight
             else:
                 self.update_status("Invalid style input. Keeping previous.", "red")
                 save_objects_to_file()
                 self.opengl_canvas.update()
                 selected_object_id = -1 # Deselect if invalid style input (Changed from None)
+                self._highlight_active_transform_button(None) # Clear any active transform
+                self._highlight_active_object_action_button(None) # Clear any active object action
+                self._highlight_active_algo_button(None) # Also clear algorithm highlight
+                self._highlight_active_style_button(None) # Also clear style highlight
             
         def edit_color_callback_dialog():
             nonlocal obj_to_edit
@@ -1284,6 +1522,11 @@ class MainWindow(QMainWindow):
             self.activate_input_dialog(f"New style (1=Solid, 2=Dotted, 3=Thick, 4=User-defined, current: {current_style_name}):", edit_style_callback)
 
         edit_color_callback_dialog()
+        self._highlight_active_transform_button(None) # Clear any active transform
+        self._highlight_active_object_action_button(None) # Clear any active object action
+        self._highlight_active_algo_button(None) # Also clear algorithm highlight
+        self._highlight_active_style_button(None) # Also clear style highlight
+
 
     def delete_selected_object(self):
         global selected_object_id, objects_to_draw
@@ -1293,13 +1536,20 @@ class MainWindow(QMainWindow):
             save_objects_to_file()
             self.update_status("Object deleted and saved. Deselected object.", "green")
             self.opengl_canvas.update()
+            self._highlight_active_transform_button(None) # Clear any active transform
+            self._highlight_active_object_action_button(None) # Clear any active object action
+            self._highlight_active_algo_button(None) # Also clear algorithm highlight
+            self._highlight_active_style_button(None) # Also clear style highlight
         else:
             self.update_status("No object selected to delete.", "red")
 
-    def prompt_rotate(self):
+    def prompt_rotate(self, button_ref=None): # Added button_ref
         global selected_object_id, current_mode
         if selected_object_id == -1: # Changed from None
             self.update_status("No object selected for rotation.", "red")
+            self._highlight_active_transform_button(None) # Clear highlight if no object
+            self._highlight_active_algo_button(None) # Also clear algorithm highlight
+            self._highlight_active_style_button(None) # Also clear style highlight
             return
         
         obj_to_transform = next((obj for obj in objects_to_draw if obj["id"] == selected_object_id), None)
@@ -1307,7 +1557,13 @@ class MainWindow(QMainWindow):
             self.update_status("Error: Selected object not found for rotation.", "red")
             selected_object_id = -1 # Changed from None
             self.opengl_canvas.update()
+            self._highlight_active_transform_button(None) # Clear highlight if object not found
+            self._highlight_active_algo_button(None) # Also clear algorithm highlight
+            self._highlight_active_style_button(None) # Also clear style highlight
             return
+
+        self._highlight_active_transform_button(button_ref) # Highlight the clicked button
+        current_mode = MODE_APPLY_ROTATE # Set the mode for the transformation
 
         def rotate_callback(angle_str):
             nonlocal obj_to_transform
@@ -1329,14 +1585,20 @@ class MainWindow(QMainWindow):
                 self.update_status("Invalid angle. Please enter a number.", "red") # More specific error
             selected_object_id = -1 # Deselect after transformation
             self.set_mode(MODE_IDLE, "Idle (after rotation)")
+            self._highlight_active_transform_button(None) # Clear highlight after transformation
+            self._highlight_active_algo_button(None) # Also clear algorithm highlight
+            self._highlight_active_style_button(None) # Also clear style highlight
             self.opengl_canvas.update()
         self.activate_input_dialog("Enter rotation angle (degrees):", rotate_callback)
 
 
-    def prompt_scale(self):
+    def prompt_scale(self, button_ref=None): # Added button_ref
         global selected_object_id, current_mode
         if selected_object_id == -1: # Changed from None
             self.update_status("No object selected for scaling.", "red")
+            self._highlight_active_transform_button(None) # Clear highlight if no object
+            self._highlight_active_algo_button(None) # Also clear algorithm highlight
+            self._highlight_active_style_button(None) # Also clear style highlight
             return
 
         obj_to_transform = next((obj for obj in objects_to_draw if obj["id"] == selected_object_id), None)
@@ -1344,7 +1606,13 @@ class MainWindow(QMainWindow):
             self.update_status("Error: Selected object not found for scaling.", "red")
             selected_object_id = -1 # Changed from None
             self.opengl_canvas.update()
+            self._highlight_active_transform_button(None) # Clear highlight if object not found
+            self._highlight_active_algo_button(None) # Also clear algorithm highlight
+            self._highlight_active_style_button(None) # Also clear style highlight
             return
+
+        self._highlight_active_transform_button(button_ref) # Highlight the clicked button
+        current_mode = MODE_APPLY_SCALE # Set the mode for the transformation
 
         def scale_y_callback(scale_y_str):
             nonlocal obj_to_transform
@@ -1369,6 +1637,9 @@ class MainWindow(QMainWindow):
                 self.update_status("Invalid scale factors. Please enter numbers.", "red") # More specific error
             selected_object_id = -1 # Deselect after transformation
             self.set_mode(MODE_IDLE, "Idle (after scaling)")
+            self._highlight_active_transform_button(None) # Clear highlight after transformation
+            self._highlight_active_algo_button(None) # Also clear algorithm highlight
+            self._highlight_active_style_button(None) # Also clear style highlight
             self.opengl_canvas.update()
 
         def scale_x_callback(scale_x_str):
@@ -1381,16 +1652,22 @@ class MainWindow(QMainWindow):
                 self.update_status("Invalid X scale factor. Please enter a number.", "red")
                 selected_object_id = -1 # Deselect if invalid input
                 self.set_mode(MODE_IDLE, "Idle (scale cancelled)")
+                self._highlight_active_transform_button(None) # Clear highlight if cancelled
+                self._highlight_active_algo_button(None) # Also clear algorithm highlight
+                self._highlight_active_style_button(None) # Also clear style highlight
                 self.opengl_canvas.update()
 
 
         self.activate_input_dialog("Enter X scale factor:", scale_x_callback)
 
 
-    def prompt_reflect(self):
+    def prompt_reflect(self, button_ref=None): # Added button_ref
         global selected_object_id, current_mode
         if selected_object_id == -1: # Changed from None
             self.update_status("No object selected for reflection.", "red")
+            self._highlight_active_transform_button(None) # Clear highlight if no object
+            self._highlight_active_algo_button(None) # Also clear algorithm highlight
+            self._highlight_active_style_button(None) # Also clear style highlight
             return
 
         obj_to_transform = next((obj for obj in objects_to_draw if obj["id"] == selected_object_id), None)
@@ -1398,21 +1675,55 @@ class MainWindow(QMainWindow):
             self.update_status("Error: Selected object not found for reflection.", "red")
             selected_object_id = -1 # Changed from None
             self.opengl_canvas.update()
+            self._highlight_active_transform_button(None) # Clear highlight if object not found
+            self._highlight_active_algo_button(None) # Also clear algorithm highlight
+            self._highlight_active_style_button(None) # Also clear style highlight
             return
 
-        def reflect_callback(axis_str):
+        self._highlight_active_transform_button(button_ref) # Highlight the clicked button
+        current_mode = MODE_APPLY_REFLECT # Set the mode for the transformation
+
+        def reflect_option_callback(choice_str):
             nonlocal obj_to_transform
-            global selected_object_id
-            if axis_str.lower() in ["x", "y", "origin"]:
-                obj_to_transform["transformations"].append({"type": "reflect", "axis": axis_str.lower()})
-                self.update_status(f"Reflected across {axis_str.lower()}-axis.", "blue")
-                save_objects_to_file()
+            global selected_object_id, current_mode, temp_points
+
+            choice = choice_str.lower()
+            if choice == "x" or choice == "1":
+                obj_to_transform["transformations"].append({"type": "reflect", "axis": "x"})
+                self.update_status("Reflected across X-axis.", "blue")
+            elif choice == "y" or choice == "2":
+                obj_to_transform["transformations"].append({"type": "reflect", "axis": "y"})
+                self.update_status("Reflected across Y-axis.", "blue")
+            elif choice == "origin" or choice == "3":
+                obj_to_transform["transformations"].append({"type": "reflect", "axis": "origin"})
+                self.update_status("Reflected across origin.", "blue")
+            elif choice == "line" or choice == "4":
+                # User chose arbitrary line reflection, enter the new mode
+                current_mode = MODE_APPLY_REFLECT_LINE_P1
+                temp_points = [] # Clear any old temp points
+                self.update_status("Selected 'Line Reflection'. Click first point (P1) on canvas.", "#333333")
+                self.opengl_canvas.update() # Update to show active mode
+                selected_object_id = obj_to_transform["id"] # Keep object selected for line definition
+                self._highlight_active_transform_button(button_ref) # Keep reflect button highlighted during line definition
+                self._highlight_active_algo_button(None) # Also clear algorithm highlight
+                self._highlight_active_style_button(None) # Also clear style highlight
+                return # Don't reset mode or deselect yet, as we need more clicks
             else:
-                self.update_status("Invalid reflection axis. Use 'x', 'y', or 'origin'.", "red")
-            selected_object_id = -1 # Deselect after transformation
-            self.set_mode(MODE_IDLE, "Idle (after reflection)")
+                self.update_status("Invalid reflection choice. Use 'x', 'y', 'origin', or 'line'.", "red")
+            
+            # If an axis/origin reflection was applied, reset mode and deselect
+            if current_mode != MODE_APPLY_REFLECT_LINE_P1: # Only reset if not entering line selection mode
+                selected_object_id = -1 
+                self.set_mode(MODE_IDLE, "Idle (after reflection)")
+                self._highlight_active_transform_button(None) # Clear highlight after transformation
+                self._highlight_active_algo_button(None) # Also clear algorithm highlight
+                self._highlight_active_style_button(None) # Also clear style highlight
+            
+            save_objects_to_file()
             self.opengl_canvas.update()
-        self.activate_input_dialog("Reflect across (x/y/origin):", reflect_callback)
+
+        self.activate_input_dialog("Reflect across (x/y/origin/line or 1/2/3/4):", reflect_option_callback)
+
 
     # --- In-Window Input Dialog (PyQt-based) ---
     def activate_input_dialog(self, prompt, callback):
@@ -1470,11 +1781,16 @@ class MainWindow(QMainWindow):
                                         MODE_DRAWING_CIRCLE_CENTER, MODE_DRAWING_CIRCLE_RADIUS,
                                         MODE_DRAWING_ELLIPSE_CENTER, MODE_DRAWING_ELLIPSE_RX_POINT,
                                         MODE_DRAWING_ELLIPSE_RY_POINT,
-                                        MODE_APPLY_TRANSLATE] and temp_points:
+                                        MODE_APPLY_TRANSLATE,
+                                        MODE_APPLY_REFLECT_LINE_P1, MODE_APPLY_REFLECT_LINE_P2] and temp_points: # Added new reflect modes
                         temp_points.clear()
                         self.update_status(f"Drawing/Operation for mode {current_mode} cancelled.", "orange")
                         selected_object_id = -1 # Also deselect on cancel
                         current_mode = MODE_IDLE # Reset mode
+                        self._highlight_active_transform_button(None) # Clear highlight on cancel
+                        self._highlight_active_object_action_button(None) # Clear highlight on cancel
+                        self._highlight_active_algo_button(None) # Also clear algorithm highlight on cancel
+                        self._highlight_active_style_button(None) # Also clear style highlight on cancel
                     self.opengl_canvas.update()
                     return True
         return super().eventFilter(obj, event)
