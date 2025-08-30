@@ -1,6 +1,7 @@
 import sys
 import math
 import json
+import copy
 import os
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -940,27 +941,42 @@ class OpenGLCanvas(QOpenGLWidget):
                 temp_points.append((logical_x, logical_y))
                 current_mode = MODE_APPLY_REFLECT_LINE_P2
                 self.main_window_ref.update_status(f"Line Reflection P1 (snapped): ({logical_x}, {logical_y}). Click P2 to define reflection line.", "#333333")
+            # Located inside the OpenGLCanvas class, inside the mousePressEvent method
+
             elif selected_object_id != -1 and current_mode == MODE_APPLY_REFLECT_LINE_P2:
                 obj_to_transform = next((obj for obj in objects_to_draw if obj["id"] == selected_object_id), None)
                 if obj_to_transform:
+                    # ADDED: Create a deep copy BEFORE applying the transformation
+                    reflected_obj = copy.deepcopy(obj_to_transform)
+                    
+                    # ADDED: Assign a new unique ID and increment the global counter
+                    reflected_obj["id"] = next_object_id
+                    next_object_id += 1
+
                     temp_points.append((logical_x, logical_y))
                     line_p1x, line_p1y = temp_points[0]
                     line_p2x, line_p2y = temp_points[1]
                     
-                    obj_to_transform["transformations"].append({
+                    # CHANGED: Apply the transformation to the NEW copied object
+                    reflected_obj["transformations"].append({
                         "type": "reflect_line",
                         "line_p1": (line_p1x, line_p1y),
                         "line_p2": (line_p2x, line_p2y)
                     })
-                    self.main_window_ref.update_status(f"Reflected across line from ({line_p1x}, {line_p1y}) to ({line_p2x}, {line_p2y}).", "blue")
+
+                    # ADDED: Add the new object to the main drawing list
+                    objects_to_draw.append(reflected_obj)
+                    
+                    self.main_window_ref.update_status(f"Reflected object {obj_to_transform['id']} to new object {reflected_obj['id']}.", "blue")
                     save_objects_to_file()
                     temp_points = []
                     selected_object_id = -1 # Deselect after transformation
                     current_mode = MODE_IDLE
-                    self.main_window_ref._highlight_active_transform_button(None) # Clear transform buttons
-                    self.main_window_ref._highlight_active_algo_button(None) # Also clear algorithm highlight
-                    self.main_window_ref._highlight_active_style_button(None) # Also clear style highlight
+                    self.main_window_ref._highlight_active_transform_button(None)
+                    self.main_window_ref._highlight_active_algo_button(None)
+                    self.main_window_ref._highlight_active_style_button(None)
                 else:
+        # ... (error handling remains the same)
                     self.main_window_ref.update_status("No object selected for line reflection.", "red")
                     selected_object_id = -1
                     current_mode = MODE_IDLE
@@ -1683,41 +1699,62 @@ class MainWindow(QMainWindow):
         self._highlight_active_transform_button(button_ref) # Highlight the clicked button
         current_mode = MODE_APPLY_REFLECT # Set the mode for the transformation
 
+        # Located inside the MainWindow class, inside the prompt_reflect method
+
         def reflect_option_callback(choice_str):
             nonlocal obj_to_transform
-            global selected_object_id, current_mode, temp_points
+            # ADD objects_to_draw and next_object_id to the global statement
+            global selected_object_id, current_mode, temp_points, objects_to_draw, next_object_id
 
             choice = choice_str.lower()
-            if choice == "x" or choice == "1":
-                obj_to_transform["transformations"].append({"type": "reflect", "axis": "x"})
-                self.update_status("Reflected across X-axis.", "blue")
-            elif choice == "y" or choice == "2":
-                obj_to_transform["transformations"].append({"type": "reflect", "axis": "y"})
-                self.update_status("Reflected across Y-axis.", "blue")
-            elif choice == "origin" or choice == "3":
-                obj_to_transform["transformations"].append({"type": "reflect", "axis": "origin"})
-                self.update_status("Reflected across origin.", "blue")
+            
+            # This block handles the duplication for X, Y, and Origin reflections
+            if choice in ["x", "1", "y", "2", "origin", "3"]:
+                # ADDED: Create a deep copy of the selected object
+                reflected_obj = copy.deepcopy(obj_to_transform)
+                
+                # ADDED: Assign a new unique ID and increment the global counter
+                reflected_obj["id"] = next_object_id
+                next_object_id += 1
+
+                axis = ""
+                if choice == "x" or choice == "1":
+                    axis = "x"
+                elif choice == "y" or choice == "2":
+                    axis = "y"
+                elif choice == "origin" or choice == "3":
+                    axis = "origin"
+                
+                # CHANGED: Apply transformation to the NEW copied object
+                reflected_obj["transformations"].append({"type": "reflect", "axis": axis})
+                
+                # ADDED: Add the newly reflected object to the main drawing list
+                objects_to_draw.append(reflected_obj)
+
+                self.update_status(f"Reflected object {obj_to_transform['id']} to new object {reflected_obj['id']} across {axis}-axis.", "blue")
+            
             elif choice == "line" or choice == "4":
                 # User chose arbitrary line reflection, enter the new mode
+                # This part remains the same, as the duplication will happen later upon mouse click.
                 current_mode = MODE_APPLY_REFLECT_LINE_P1
-                temp_points = [] # Clear any old temp points
+                temp_points = []
                 self.update_status("Selected 'Line Reflection'. Click first point (P1) on canvas.", "#333333")
-                self.opengl_canvas.update() # Update to show active mode
-                selected_object_id = obj_to_transform["id"] # Keep object selected for line definition
-                self._highlight_active_transform_button(button_ref) # Keep reflect button highlighted during line definition
-                self._highlight_active_algo_button(None) # Also clear algorithm highlight
-                self._highlight_active_style_button(None) # Also clear style highlight
-                return # Don't reset mode or deselect yet, as we need more clicks
+                self.opengl_canvas.update()
+                selected_object_id = obj_to_transform["id"]
+                self._highlight_active_transform_button(button_ref)
+                self._highlight_active_algo_button(None)
+                self._highlight_active_style_button(None)
+                return # Don't reset mode or deselect yet
             else:
                 self.update_status("Invalid reflection choice. Use 'x', 'y', 'origin', or 'line'.", "red")
             
             # If an axis/origin reflection was applied, reset mode and deselect
-            if current_mode != MODE_APPLY_REFLECT_LINE_P1: # Only reset if not entering line selection mode
+            if current_mode != MODE_APPLY_REFLECT_LINE_P1:
                 selected_object_id = -1 
                 self.set_mode(MODE_IDLE, "Idle (after reflection)")
-                self._highlight_active_transform_button(None) # Clear highlight after transformation
-                self._highlight_active_algo_button(None) # Also clear algorithm highlight
-                self._highlight_active_style_button(None) # Also clear style highlight
+                self._highlight_active_transform_button(None)
+                self._highlight_active_algo_button(None)
+                self._highlight_active_style_button(None)
             
             save_objects_to_file()
             self.opengl_canvas.update()
